@@ -9,8 +9,8 @@ name: Job Alert Agent
 
 on:
   schedule:
-    - cron: "0 */4 * * *"   # every 4 hours
-  workflow_dispatch:        # allows manual run
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
 
 jobs:
   run-agent:
@@ -31,5 +31,7 @@ jobs:
       - name: Run job alert agent
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python job_alert_agent.py          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python job_alert_agent.py
