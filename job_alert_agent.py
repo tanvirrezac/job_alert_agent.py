@@ -1,14 +1,11 @@
-# Phase-3, Step-2
-# What this part does:
-# 1. Runs your job alert agent as a standalone Python script
-# 2. Collects recent analyst jobs from Google News RSS
-# 3. Filters to last 24 hours
-# 4. Removes obvious senior-only roles and junk/non-job content
-# 5. Scores and ranks jobs for your target roles
-# 6. Splits Telegram alerts into Top Jobs and Additional Jobs
-# 7. Prevents duplicate Telegram alerts across runs
-# 8. Saves a running CSV database
-# 9. Keeps the project ready for GitHub Actions scheduling
+# Phase-3, Volume Mode
+# Goal:
+# 1. Collect more analyst jobs
+# 2. Keep up to TOP_N = 50 alerts
+# 3. Filter only obvious junk and duplicates
+# 4. Keep senior filtering light
+# 5. Save sent jobs and job database
+# 6. Stay compatible with GitHub Actions
 
 import os
 import re
@@ -31,6 +28,9 @@ KEYWORDS = [
     "reporting analyst",
     "operations analyst",
     "insights analyst",
+    "bi analyst",
+    "analytics analyst",
+    "business systems analyst",
 ]
 
 LOCATIONS = [
@@ -40,6 +40,12 @@ LOCATIONS = [
     "Ontario",
     "Edmonton",
     "Vancouver",
+    "Mississauga",
+    "Brampton",
+    "Markham",
+    "Richmond Hill",
+    "Burnaby",
+    "Surrey",
 ]
 
 SITE_HINTS = [
@@ -51,16 +57,20 @@ SITE_HINTS = [
     "site:jobs.ashbyhq.com",
 ]
 
-EXCLUDE_SENIOR_TERMS = [
+EXCLUDE_HARD_TERMS = [
+    "director",
+    "vice president",
+    "vp",
+    "head of",
+    "chief",
+]
+
+SOFT_SENIOR_TERMS = [
     "senior",
+    "sr.",
     "lead",
     "principal",
     "manager",
-    "director",
-    "head",
-    "vp",
-    "vice president",
-    "staff ",
 ]
 
 PREFER_TERMS = [
@@ -71,8 +81,12 @@ PREFER_TERMS = [
     "reporting analyst",
     "operations analyst",
     "insights analyst",
+    "analytics analyst",
+    "business systems analyst",
+    "bi analyst",
     "analyst",
     "business intelligence",
+    "analytics",
 ]
 
 TARGET_ROLE_BONUS = {
@@ -83,6 +97,9 @@ TARGET_ROLE_BONUS = {
     "reporting analyst": 4,
     "operations analyst": 4,
     "insights analyst": 4,
+    "analytics analyst": 4,
+    "business systems analyst": 4,
+    "bi analyst": 4,
 }
 
 CITY_PRIORITY = {
@@ -92,97 +109,17 @@ CITY_PRIORITY = {
     "Ontario": 3,
     "Edmonton": 2,
     "Vancouver": 2,
+    "Mississauga": 2,
+    "Brampton": 2,
+    "Markham": 2,
+    "Richmond Hill": 2,
+    "Burnaby": 2,
+    "Surrey": 2,
 }
 
 TOP_N = 50
-TOP_JOBS_COUNT = 15
-
 SENT_FILE = "sent_jobs.csv"
 DATABASE_FILE = "job_database.csv"
-
-GOOD_EXTRA_KEYWORDS = [
-    "sql",
-    "power bi",
-    "tableau",
-    "excel",
-    "dashboard",
-    "reporting",
-    "analytics",
-    "kpi",
-    "stakeholder",
-    "requirements",
-    "etl",
-    "python",
-]
-
-BAD_TITLE_KEYWORDS = [
-    "senior",
-    "sr.",
-    "lead",
-    "principal",
-    "manager",
-    "director",
-    "vp",
-    "vice president",
-    "architect",
-    "staff",
-    "head",
-    "president",
-    "consultant",
-    "specialist",
-    "scientist",
-    "engineer",
-    "developer",
-    "intern",
-    "co-op",
-    "coop",
-    "student",
-]
-
-BAD_CONTENT_KEYWORDS = [
-    "news",
-    "article",
-    "press release",
-    "hiring trends",
-    "career advice",
-    "how to become",
-    "salary guide",
-    "interview tips",
-    "sponsored",
-    "market update",
-    "bootcamp",
-    "certificate",
-    "program",
-    "podcast",
-    "blog",
-    "course",
-]
-
-EXCLUDED_COMPANY_PATTERNS = [
-    "youtube",
-    "reddit",
-    "facebook",
-    "instagram",
-    "tiktok",
-]
-
-TARGET_ROLE_KEYWORDS = {
-    "Data Analyst": [
-        "data analyst",
-        "analytics analyst",
-        "reporting analyst",
-        "business intelligence analyst",
-        "bi analyst",
-        "insights analyst",
-    ],
-    "Business Analyst": [
-        "business analyst",
-        "systems analyst",
-        "functional analyst",
-        "process analyst",
-        "business systems analyst",
-    ],
-}
 
 # =========================
 # Helpers
@@ -191,22 +128,18 @@ TARGET_ROLE_KEYWORDS = {
 def normalize_text(x):
     return str(x).strip().lower()
 
-def clean_text(text):
-    if not text:
-        return ""
-    text = str(text).lower().strip()
-    text = re.sub(r"\s+", " ", text)
-    return text
-
 def looks_like_job_title(title: str) -> bool:
     t = normalize_text(title)
-    good = any(k in t for k in KEYWORDS)
+
+    good = any(k in t for k in KEYWORDS) or "analyst" in t
+
     bad_terms = [
-        "salary", "how to", "career", "unemployment", "tips", "pros", "news",
-        "hiring right now", "finance enthusiast", "returning to the firm",
-        "course", "bootcamp", "certificate", "program", "podcast", "article", "blog",
+        "salary", "how to", "career advice", "tips", "pros and cons", "news",
+        "article", "blog", "podcast", "course", "bootcamp", "certificate",
+        "program", "market update", "hiring trends", "interview tips",
     ]
     bad = any(b in t for b in bad_terms)
+
     return good and not bad
 
 def published_within_24h(published_text: str) -> bool:
@@ -219,9 +152,13 @@ def published_within_24h(published_text: str) -> bool:
     except Exception:
         return False
 
-def is_too_senior(title: str) -> bool:
+def is_hard_excluded(title: str) -> bool:
     t = normalize_text(title)
-    return any(term in t for term in EXCLUDE_SENIOR_TERMS)
+    return any(term in t for term in EXCLUDE_HARD_TERMS)
+
+def has_soft_senior_term(title: str) -> bool:
+    t = normalize_text(title)
+    return any(term in t for term in SOFT_SENIOR_TERMS)
 
 def source_type_from_title_and_link(title: str, raw_link: str) -> str:
     title_l = normalize_text(title)
@@ -276,9 +213,9 @@ def assign_role_bucket(title: str) -> str:
 
     if "business intelligence analyst" in t or "bi analyst" in t:
         return "BI Analyst"
-    if "business analyst" in t:
+    if "business analyst" in t or "business systems analyst" in t:
         return "Business Analyst"
-    if "data analyst" in t:
+    if "data analyst" in t or "analytics analyst" in t:
         return "Data Analyst"
     if "product analyst" in t:
         return "Product Analyst"
@@ -290,43 +227,10 @@ def assign_role_bucket(title: str) -> str:
         return "Insights Analyst"
     return "Other Analyst"
 
-def is_probable_job_post(row) -> bool:
-    title = clean_text(row.get("title", ""))
-    source_type = clean_text(row.get("source_type", ""))
-    raw_link = clean_text(row.get("raw_link", ""))
-    location = clean_text(row.get("location", ""))
-    keyword = clean_text(row.get("keyword", ""))
-
-    combined = f"{title} {source_type} {raw_link} {location} {keyword}"
-
-    role_hit = any(
-        kw in combined
-        for role_list in TARGET_ROLE_KEYWORDS.values()
-        for kw in role_list
-    ) or "analyst" in title
-
-    if not role_hit:
-        return False
-
-    if any(bad in combined for bad in BAD_CONTENT_KEYWORDS):
-        return False
-
-    if any(site in combined for site in EXCLUDED_COMPANY_PATTERNS):
-        return False
-
-    if any(bad in title for bad in BAD_TITLE_KEYWORDS):
-        return False
-
-    return True
-
 def score_job(row):
-    title = clean_text(row["title"])
-    location = clean_text(row["location"])
-    source_type = clean_text(row["source_type"])
-    keyword = clean_text(row.get("keyword", ""))
-    company_name = clean_text(row.get("company_name", ""))
-
-    text_all = f"{title} {location} {source_type} {keyword} {company_name}"
+    title = normalize_text(row["title"])
+    location = row["location"]
+    source_type = row["source_type"]
 
     score = 0
 
@@ -338,7 +242,7 @@ def score_job(row):
         if term in title:
             score += 1
 
-    score += CITY_PRIORITY.get(row["location"], 0)
+    score += CITY_PRIORITY.get(location, 0)
 
     source_bonus = {
         "lever": 4,
@@ -351,33 +255,11 @@ def score_job(row):
     }
     score += source_bonus.get(source_type, 0)
 
-    if any(k in title for k in TARGET_ROLE_KEYWORDS["Data Analyst"]):
-        score += 20
-    elif any(k in title for k in TARGET_ROLE_KEYWORDS["Business Analyst"]):
-        score += 20
-    elif "analyst" in title:
-        score += 5
-
-    for kw in GOOD_EXTRA_KEYWORDS:
-        if kw in text_all:
-            score += 2
-
-    if "toronto" in location:
-        score += 12
-    if "calgary" in location:
-        score += 10
-    if "remote canada" in location:
-        score += 14
-    elif "remote" in location:
-        score += 6
-    elif "ontario" in location:
-        score += 4
-
-    if is_too_senior(title):
-        score -= 25
+    if has_soft_senior_term(title):
+        score -= 2
 
     if looks_staffing_like(title):
-        score -= 3
+        score -= 2
 
     return score
 
@@ -411,7 +293,7 @@ def collect_jobs():
     return pd.DataFrame(rows)
 
 # =========================
-# Filter, enrich, rank
+# Filter, enrich, and rank
 # =========================
 
 def clean_and_rank(df):
@@ -421,15 +303,15 @@ def clean_and_rank(df):
     df = df.copy()
     df["is_job_like"] = df["title"].apply(looks_like_job_title)
     df["within_24h"] = df["published"].apply(published_within_24h)
-    df["too_senior"] = df["title"].apply(is_too_senior)
+    df["hard_excluded"] = df["title"].apply(is_hard_excluded)
+    df["soft_senior"] = df["title"].apply(has_soft_senior_term)
     df["staffing_like"] = df["title"].apply(looks_staffing_like)
-    df["probable_job_post"] = df.apply(is_probable_job_post, axis=1)
 
     filtered_df = (
         df[
             (df["is_job_like"]) &
             (df["within_24h"]) &
-            (df["probable_job_post"])
+            (~df["hard_excluded"])
         ]
         .drop_duplicates(subset=["title", "raw_link"])
         .reset_index(drop=True)
@@ -443,10 +325,7 @@ def clean_and_rank(df):
     filtered_df["fit_score"] = filtered_df.apply(score_job, axis=1)
 
     final_df = (
-        filtered_df[
-            (~filtered_df["too_senior"]) &
-            (filtered_df["fit_score"] >= 8)
-        ]
+        filtered_df
         .sort_values(["fit_score", "staffing_like", "published"], ascending=[False, True, False])
         .reset_index(drop=True)
     )
@@ -516,7 +395,7 @@ def load_job_database():
     expected_cols = [
         "run_timestamp_utc", "keyword", "location", "source_type", "company_name",
         "role_bucket", "title", "published", "raw_link", "fit_score",
-        "staffing_like", "too_senior",
+        "staffing_like", "soft_senior",
     ]
 
     if not os.path.exists(DATABASE_FILE):
@@ -545,7 +424,7 @@ def update_job_database(new_jobs_df):
     keep_cols = [
         "run_timestamp_utc", "keyword", "location", "source_type", "company_name",
         "role_bucket", "title", "published", "raw_link", "fit_score",
-        "staffing_like", "too_senior",
+        "staffing_like", "soft_senior",
     ]
 
     for col in keep_cols:
@@ -563,53 +442,29 @@ def update_job_database(new_jobs_df):
 # Telegram
 # =========================
 
-def build_telegram_message(df):
-    if df.empty:
-        return "📭 No new good-fit analyst jobs found in the last 24 hours."
-
-    send_df = df.head(TOP_N).copy().reset_index(drop=True)
-    top_df = send_df.head(TOP_JOBS_COUNT)
-    additional_df = send_df.iloc[TOP_JOBS_COUNT:]
-
-    lines = []
-    lines.append("📌 Job Alert Agent")
-    lines.append(f"Top {len(send_df)} new best-fit jobs from the last 24 hours")
-    lines.append("")
-
-    lines.append("🔥 Top Job Matches")
-    lines.append("")
-
-    for i, row in top_df.iterrows():
-        lines.append(
-            f"{i+1}. {row['title']}\n"
-            f"Company: {row['company_name']}\n"
-            f"Role Bucket: {row['role_bucket']}\n"
-            f"Search Location: {row['location']}\n"
-            f"Source Type: {row['source_type']}\n"
-            f"Fit Score: {row['fit_score']}\n"
-            f"Published: {row['published']}\n"
-            f"{row['link']}\n"
-        )
-
-    if not additional_df.empty:
-        lines.append("")
-        lines.append("📎 Additional Matches")
-        lines.append("")
-
-        for i, row in additional_df.iterrows():
-            lines.append(
-                f"{i+1}. {row['title']} | {row['company_name']} | "
-                f"{row['location']} | Score: {row['fit_score']}\n"
-                f"{row['link']}\n"
-            )
-
-    return "\n".join(lines)
-
 def send_telegram(df):
     bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
-    message = build_telegram_message(df)
+    if df.empty:
+        message = "📭 No new analyst jobs found in the last 24 hours."
+    else:
+        send_df = df.head(TOP_N).copy().reset_index(drop=True)
+        lines = [f"📌 Job Alert Agent\nTop {len(send_df)} new analyst jobs from the last 24 hours\n"]
+
+        for i, row in send_df.iterrows():
+            lines.append(
+                f"{i+1}. {row['title']}\n"
+                f"Company: {row['company_name']}\n"
+                f"Role Bucket: {row['role_bucket']}\n"
+                f"Search Location: {row['location']}\n"
+                f"Source Type: {row['source_type']}\n"
+                f"Fit Score: {row['fit_score']}\n"
+                f"Published: {row['published']}\n"
+                f"{row['link']}\n"
+            )
+
+        message = "\n".join(lines)
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     chunk_size = 3500
