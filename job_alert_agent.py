@@ -1,12 +1,3 @@
-# Phase-3, Volume Mode
-# Goal:
-# 1. Collect more analyst jobs
-# 2. Keep up to TOP_N = 50 alerts
-# 3. Filter only obvious junk and duplicates
-# 4. Keep senior filtering light
-# 5. Save sent jobs and job database
-# 6. Stay compatible with GitHub Actions
-
 import os
 import re
 import requests
@@ -31,6 +22,8 @@ KEYWORDS = [
     "bi analyst",
     "analytics analyst",
     "business systems analyst",
+    "product owner",
+    "data product owner",
 ]
 
 LOCATIONS = [
@@ -51,20 +44,28 @@ LOCATIONS = [
 SITE_HINTS = [
     "site:linkedin.com/jobs",
     "site:ca.indeed.com",
+    "site:indeed.com",
     "site:jobs.lever.co",
     "site:boards.greenhouse.io",
     "site:workdayjobs.com",
     "site:jobs.ashbyhq.com",
+    "site:jobs.smartrecruiters.com",
+    "site:jobs.jobvite.com",
+    "site:jobs.icims.com",
 ]
 
+# hard exclude clearly off-target senior leadership
 EXCLUDE_HARD_TERMS = [
     "director",
     "vice president",
     "vp",
     "head of",
     "chief",
+    "cpo",
+    "principal product manager",
 ]
 
+# keep some seniority but push it down
 SOFT_SENIOR_TERMS = [
     "senior",
     "sr.",
@@ -84,22 +85,26 @@ PREFER_TERMS = [
     "analytics analyst",
     "business systems analyst",
     "bi analyst",
+    "product owner",
+    "data product owner",
     "analyst",
     "business intelligence",
     "analytics",
 ]
 
 TARGET_ROLE_BONUS = {
-    "business analyst": 6,
-    "data analyst": 6,
+    "business analyst": 7,
+    "data analyst": 7,
     "product analyst": 5,
     "business intelligence analyst": 5,
     "reporting analyst": 4,
     "operations analyst": 4,
     "insights analyst": 4,
     "analytics analyst": 4,
-    "business systems analyst": 4,
+    "business systems analyst": 5,
     "bi analyst": 4,
+    "product owner": 7,
+    "data product owner": 9,
 }
 
 CITY_PRIORITY = {
@@ -117,9 +122,63 @@ CITY_PRIORITY = {
     "Surrey": 2,
 }
 
-TOP_N = 50
+TOP_N = 20
 SENT_FILE = "sent_jobs.csv"
 DATABASE_FILE = "job_database.csv"
+
+GOOD_SKILL_TERMS = [
+    "sql",
+    "python",
+    "power bi",
+    "tableau",
+    "dashboard",
+    "reporting",
+    "analytics",
+    "kpi",
+    "stakeholder",
+    "requirements",
+    "backlog",
+    "roadmap",
+    "agile",
+    "scrum",
+    "jira",
+    "user stories",
+    "acceptance criteria",
+    "a/b",
+    "experimentation",
+    "data",
+    "product",
+]
+
+BAD_TITLE_TERMS = [
+    "intern",
+    "co-op",
+    "coop",
+    "student",
+    "architect",
+    "engineer",
+    "developer",
+    "scientist",
+    "recruiter",
+    "sales representative",
+]
+
+BAD_CONTENT_TERMS = [
+    "salary",
+    "how to",
+    "career advice",
+    "tips",
+    "article",
+    "blog",
+    "podcast",
+    "course",
+    "bootcamp",
+    "certificate",
+    "program",
+    "market update",
+    "hiring trends",
+    "interview tips",
+]
 
 # =========================
 # Helpers
@@ -128,18 +187,17 @@ DATABASE_FILE = "job_database.csv"
 def normalize_text(x):
     return str(x).strip().lower()
 
+def clean_text(text):
+    if not text:
+        return ""
+    text = str(text).lower().strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
 def looks_like_job_title(title: str) -> bool:
     t = normalize_text(title)
-
-    good = any(k in t for k in KEYWORDS) or "analyst" in t
-
-    bad_terms = [
-        "salary", "how to", "career advice", "tips", "pros and cons", "news",
-        "article", "blog", "podcast", "course", "bootcamp", "certificate",
-        "program", "market update", "hiring trends", "interview tips",
-    ]
-    bad = any(b in t for b in bad_terms)
-
+    good = any(k in t for k in KEYWORDS) or "analyst" in t or "product owner" in t
+    bad = any(b in t for b in BAD_CONTENT_TERMS) or any(b in t for b in BAD_TITLE_TERMS)
     return good and not bad
 
 def published_within_24h(published_text: str) -> bool:
@@ -166,7 +224,7 @@ def source_type_from_title_and_link(title: str, raw_link: str) -> str:
 
     if "linkedin" in title_l or "linkedin.com/jobs" in link_l:
         return "linkedin"
-    if "indeed" in title_l or "ca.indeed.com" in link_l:
+    if "indeed" in title_l or "ca.indeed.com" in link_l or "indeed.com" in link_l:
         return "indeed"
     if "jobs.lever.co" in link_l:
         return "lever"
@@ -176,6 +234,12 @@ def source_type_from_title_and_link(title: str, raw_link: str) -> str:
         return "workday"
     if "ashbyhq" in link_l:
         return "ashby"
+    if "smartrecruiters" in link_l:
+        return "smartrecruiters"
+    if "jobvite" in link_l:
+        return "jobvite"
+    if "icims" in link_l:
+        return "icims"
     return "other"
 
 def looks_staffing_like(title: str) -> bool:
@@ -211,6 +275,10 @@ def extract_company_name(title: str) -> str:
 def assign_role_bucket(title: str) -> str:
     t = normalize_text(title)
 
+    if "data product owner" in t:
+        return "Data Product Owner"
+    if "product owner" in t:
+        return "Product Owner"
     if "business intelligence analyst" in t or "bi analyst" in t:
         return "BI Analyst"
     if "business analyst" in t or "business systems analyst" in t:
@@ -225,12 +293,16 @@ def assign_role_bucket(title: str) -> str:
         return "Operations Analyst"
     if "insights analyst" in t:
         return "Insights Analyst"
-    return "Other Analyst"
+    return "Other"
 
 def score_job(row):
-    title = normalize_text(row["title"])
-    location = row["location"]
-    source_type = row["source_type"]
+    title = clean_text(row["title"])
+    location = clean_text(row["location"])
+    source_type = clean_text(row["source_type"])
+    keyword = clean_text(row.get("keyword", ""))
+    company_name = clean_text(row.get("company_name", ""))
+
+    text_all = f"{title} {location} {source_type} {keyword} {company_name}"
 
     score = 0
 
@@ -242,24 +314,38 @@ def score_job(row):
         if term in title:
             score += 1
 
-    score += CITY_PRIORITY.get(location, 0)
+    score += CITY_PRIORITY.get(row["location"], 0)
 
     source_bonus = {
-        "lever": 4,
-        "greenhouse": 4,
-        "workday": 4,
-        "ashby": 4,
+        "lever": 5,
+        "greenhouse": 5,
+        "workday": 5,
+        "ashby": 5,
+        "smartrecruiters": 4,
+        "jobvite": 4,
+        "icims": 4,
         "indeed": 2,
         "linkedin": 2,
         "other": 0,
     }
     score += source_bonus.get(source_type, 0)
 
+    for term in GOOD_SKILL_TERMS:
+        if term in text_all:
+            score += 1
+
+    if "toronto" in location:
+        score += 3
+    if "calgary" in location:
+        score += 3
+    if "remote canada" in location:
+        score += 4
+
     if has_soft_senior_term(title):
-        score -= 2
+        score -= 3
 
     if looks_staffing_like(title):
-        score -= 2
+        score -= 3
 
     return score
 
@@ -325,7 +411,7 @@ def clean_and_rank(df):
     filtered_df["fit_score"] = filtered_df.apply(score_job, axis=1)
 
     final_df = (
-        filtered_df
+        filtered_df[filtered_df["fit_score"] >= 8]
         .sort_values(["fit_score", "staffing_like", "published"], ascending=[False, True, False])
         .reset_index(drop=True)
     )
@@ -388,7 +474,7 @@ def save_sent_jobs(new_jobs_df):
     print(f"Saved {len(updated_df)} total records to {SENT_FILE}")
 
 # =========================
-# Full job database
+# Job database
 # =========================
 
 def load_job_database():
@@ -447,10 +533,10 @@ def send_telegram(df):
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
     if df.empty:
-        message = "📭 No new analyst jobs found in the last 24 hours."
+        message = "📭 No new high-quality analyst / product owner jobs found in the last 24 hours."
     else:
         send_df = df.head(TOP_N).copy().reset_index(drop=True)
-        lines = [f"📌 Job Alert Agent\nTop {len(send_df)} new analyst jobs from the last 24 hours\n"]
+        lines = [f"📌 Job Alert Agent\nTop {len(send_df)} new high-quality jobs from the last 24 hours\n"]
 
         for i, row in send_df.iterrows():
             lines.append(
