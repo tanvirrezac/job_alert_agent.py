@@ -94,7 +94,7 @@ CITY_PRIORITY = {
     "Vancouver": 2,
 }
 
-TOP_N = 5
+TOP_N = 50
 SENT_FILE = "sent_jobs.csv"
 DATABASE_FILE = "job_database.csv"
 
