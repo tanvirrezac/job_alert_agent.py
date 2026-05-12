@@ -54,7 +54,9 @@ SITE_HINTS = [
     "site:jobs.icims.com",
 ]
 
-# hard exclude clearly off-target senior leadership
+# ── Hard exclusions: title contains ANY of these → reject immediately ──────────
+
+# Senior/leadership terms now hard-rejected (previously only soft penalties)
 EXCLUDE_HARD_TERMS = [
     "director",
     "vice president",
@@ -63,15 +65,49 @@ EXCLUDE_HARD_TERMS = [
     "chief",
     "cpo",
     "principal product manager",
-]
-
-# keep some seniority but push it down
-SOFT_SENIOR_TERMS = [
+    # Newly hard-rejected seniority levels
     "senior",
     "sr.",
+    "sr ",
     "lead",
     "principal",
     "manager",
+    "staff ",
+]
+
+# US geography hard-rejection list (prevents US job leakage)
+US_STATE_TERMS = [
+    # States
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
+    "maine", "maryland", "massachusetts", "michigan", "minnesota",
+    "mississippi", "missouri", "montana", "nebraska", "nevada",
+    "new hampshire", "new jersey", "new mexico", "new york", "north carolina",
+    "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
+    "rhode island", "south carolina", "south dakota", "tennessee", "texas",
+    "utah", "vermont", "virginia", "washington", "west virginia",
+    "wisconsin", "wyoming",
+    # Common US cities that leak through
+    "portland", "seattle", "boston", "chicago", "austin", "dallas",
+    "houston", "denver", "phoenix", "atlanta", "miami", "san francisco",
+    "los angeles", "new york city", "nyc", "greenwood village",
+    # Long-form US identifiers only — 2-letter abbreviations removed
+    # to avoid false-matching Canadian terms (e.g. ", ca" hitting "Canada")
+    " usa", " u.s.", " united states",
+]
+
+# Junk content that Google/Indeed injects as fake "job" entries
+JUNK_TITLE_PATTERNS = [
+    r"^\d+\s+jobs?",              # "700 jobs", "12 new jobs"
+    r"jobs?,?\s+employment",      # "Jobs, Employment"
+    r"discover\s+\d+",            # "Discover 700"
+    r"salary",                    # salary pages
+    r"average\s+salary",
+    r"how\s+much\s+does",
+    r"what\s+is\s+a\s+",
+    r"indeed\.com\s*[–-]",        # Indeed portal pages
+    r"linkedin\.com\s*[–-]",
 ]
 
 PREFER_TERMS = [
@@ -92,37 +128,41 @@ PREFER_TERMS = [
     "analytics",
 ]
 
+# Balanced role scoring — no single role dominates
 TARGET_ROLE_BONUS = {
     "business analyst": 7,
     "data analyst": 7,
-    "product analyst": 5,
-    "business intelligence analyst": 5,
-    "reporting analyst": 4,
-    "operations analyst": 4,
-    "insights analyst": 4,
-    "analytics analyst": 4,
-    "business systems analyst": 5,
-    "bi analyst": 4,
+    "product analyst": 7,
+    "business intelligence analyst": 7,
+    "reporting analyst": 7,
+    "operations analyst": 6,
+    "insights analyst": 6,
+    "analytics analyst": 6,
+    "business systems analyst": 7,
+    "bi analyst": 7,
     "product owner": 7,
-    "data product owner": 9,
+    "data product owner": 7,   # previously 9; normalised to match others
 }
 
+# Slight Calgary preference; Toronto not over-boosted
 CITY_PRIORITY = {
-    "Toronto": 5,
-    "Calgary": 5,
-    '"Remote Canada"': 5,
-    "Ontario": 3,
+    "Toronto": 3,
+    "Calgary": 5,           # explicit preference
+    '"Remote Canada"': 4,
+    "Ontario": 2,
     "Edmonton": 2,
     "Vancouver": 2,
-    "Mississauga": 2,
-    "Brampton": 2,
-    "Markham": 2,
-    "Richmond Hill": 2,
-    "Burnaby": 2,
-    "Surrey": 2,
+    "Mississauga": 1,
+    "Brampton": 1,
+    "Markham": 1,
+    "Richmond Hill": 1,
+    "Burnaby": 1,
+    "Surrey": 1,
 }
 
-TOP_N = 20
+# Reduced from 20 to cut Telegram noise
+TOP_N = 12
+
 SENT_FILE = "sent_jobs.csv"
 DATABASE_FILE = "job_database.csv"
 
@@ -164,7 +204,6 @@ BAD_TITLE_TERMS = [
 ]
 
 BAD_CONTENT_TERMS = [
-    "salary",
     "how to",
     "career advice",
     "tips",
@@ -180,6 +219,13 @@ BAD_CONTENT_TERMS = [
     "interview tips",
 ]
 
+# Classification tiers for downstream triage
+CLASSIFICATION_TIERS = {
+    "DEEP": 18,     # score >= 18 → high-confidence match, apply immediately
+    "MEDIUM": 12,   # score 12–17 → worth reviewing
+    "QUICK": 0,     # score < 12 but >= threshold → quick scan only
+}
+
 # =========================
 # Helpers
 # =========================
@@ -194,8 +240,23 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text)
     return text
 
+def is_junk_title(title: str) -> bool:
+    """Catch Google/Indeed portal pages masquerading as job listings."""
+    t = normalize_text(title)
+    for pattern in JUNK_TITLE_PATTERNS:
+        if re.search(pattern, t):
+            return True
+    return False
+
+def is_us_location(title: str, location_field: str) -> bool:
+    """Return True if the job is clearly US-based."""
+    combined = normalize_text(f"{title} {location_field}")
+    return any(term in combined for term in US_STATE_TERMS)
+
 def looks_like_job_title(title: str) -> bool:
     t = normalize_text(title)
+    if is_junk_title(title):
+        return False
     good = any(k in t for k in KEYWORDS) or "analyst" in t or "product owner" in t
     bad = any(b in t for b in BAD_CONTENT_TERMS) or any(b in t for b in BAD_TITLE_TERMS)
     return good and not bad
@@ -211,12 +272,12 @@ def published_within_24h(published_text: str) -> bool:
         return False
 
 def is_hard_excluded(title: str) -> bool:
+    """
+    Hard-reject titles containing seniority/leadership terms.
+    Senior/Lead/Manager are now hard rejections (previously soft penalties).
+    """
     t = normalize_text(title)
     return any(term in t for term in EXCLUDE_HARD_TERMS)
-
-def has_soft_senior_term(title: str) -> bool:
-    t = normalize_text(title)
-    return any(term in t for term in SOFT_SENIOR_TERMS)
 
 def source_type_from_title_and_link(title: str, raw_link: str) -> str:
     title_l = normalize_text(title)
@@ -295,6 +356,17 @@ def assign_role_bucket(title: str) -> str:
         return "Insights Analyst"
     return "Other"
 
+def classify_job(fit_score: int) -> str:
+    """
+    Assign a DEEP / MEDIUM / QUICK classification tier based on fit score.
+    Replaces the previous fit-score-only output.
+    """
+    if fit_score >= CLASSIFICATION_TIERS["DEEP"]:
+        return "DEEP"
+    if fit_score >= CLASSIFICATION_TIERS["MEDIUM"]:
+        return "MEDIUM"
+    return "QUICK"
+
 def score_job(row):
     title = clean_text(row["title"])
     location = clean_text(row["location"])
@@ -306,16 +378,20 @@ def score_job(row):
 
     score = 0
 
+    # Role-title bonus (now balanced across all target roles)
     for phrase, bonus in TARGET_ROLE_BONUS.items():
         if phrase in title:
             score += bonus
 
+    # Preferred term presence
     for term in PREFER_TERMS:
         if term in title:
             score += 1
 
+    # Location priority (Calgary slightly preferred; Toronto not over-boosted)
     score += CITY_PRIORITY.get(row["location"], 0)
 
+    # Source quality bonus
     source_bonus = {
         "lever": 5,
         "greenhouse": 5,
@@ -330,22 +406,20 @@ def score_job(row):
     }
     score += source_bonus.get(source_type, 0)
 
+    # Skill-term presence in combined text
     for term in GOOD_SKILL_TERMS:
         if term in text_all:
             score += 1
 
-    if "toronto" in location:
-        score += 3
-    if "calgary" in location:
-        score += 3
-    if "remote canada" in location:
-        score += 4
+    # Location scored exclusively via CITY_PRIORITY above — no extra micro-boosts
 
-    if has_soft_senior_term(title):
-        score -= 3
-
+    # Staffing-agency penalty
     if looks_staffing_like(title):
-        score -= 3
+        score -= 5
+
+    # "Other" role-bucket penalty (weak job-quality signal)
+    if assign_role_bucket(row["title"]) == "Other":
+        score -= 4
 
     return score
 
@@ -390,14 +464,19 @@ def clean_and_rank(df):
     df["is_job_like"] = df["title"].apply(looks_like_job_title)
     df["within_24h"] = df["published"].apply(published_within_24h)
     df["hard_excluded"] = df["title"].apply(is_hard_excluded)
-    df["soft_senior"] = df["title"].apply(has_soft_senior_term)
     df["staffing_like"] = df["title"].apply(looks_staffing_like)
+
+    # US location filter applied on title + location field
+    df["us_location"] = df.apply(
+        lambda r: is_us_location(r["title"], r["location"]), axis=1
+    )
 
     filtered_df = (
         df[
             (df["is_job_like"]) &
             (df["within_24h"]) &
-            (~df["hard_excluded"])
+            (~df["hard_excluded"]) &
+            (~df["us_location"])          # ← hard-reject US jobs
         ]
         .drop_duplicates(subset=["title", "raw_link"])
         .reset_index(drop=True)
@@ -409,6 +488,9 @@ def clean_and_rank(df):
     filtered_df["company_name"] = filtered_df["title"].apply(extract_company_name)
     filtered_df["role_bucket"] = filtered_df["title"].apply(assign_role_bucket)
     filtered_df["fit_score"] = filtered_df.apply(score_job, axis=1)
+
+    # Add DEEP / MEDIUM / QUICK classification tier
+    filtered_df["classification"] = filtered_df["fit_score"].apply(classify_job)
 
     final_df = (
         filtered_df[filtered_df["fit_score"] >= 8]
@@ -474,14 +556,14 @@ def save_sent_jobs(new_jobs_df):
     print(f"Saved {len(updated_df)} total records to {SENT_FILE}")
 
 # =========================
-# Job database
+# Job database (Google Sheets-ready columns)
 # =========================
 
 def load_job_database():
     expected_cols = [
         "run_timestamp_utc", "keyword", "location", "source_type", "company_name",
-        "role_bucket", "title", "published", "raw_link", "fit_score",
-        "staffing_like", "soft_senior",
+        "role_bucket", "classification", "title", "published", "raw_link",
+        "fit_score", "staffing_like",
     ]
 
     if not os.path.exists(DATABASE_FILE):
@@ -509,8 +591,8 @@ def update_job_database(new_jobs_df):
 
     keep_cols = [
         "run_timestamp_utc", "keyword", "location", "source_type", "company_name",
-        "role_bucket", "title", "published", "raw_link", "fit_score",
-        "staffing_like", "soft_senior",
+        "role_bucket", "classification", "title", "published", "raw_link",
+        "fit_score", "staffing_like",
     ]
 
     for col in keep_cols:
@@ -536,19 +618,28 @@ def send_telegram(df):
         message = "📭 No new high-quality analyst / product owner jobs found in the last 24 hours."
     else:
         send_df = df.head(TOP_N).copy().reset_index(drop=True)
-        lines = [f"📌 Job Alert Agent\nTop {len(send_df)} new high-quality jobs from the last 24 hours\n"]
 
-        for i, row in send_df.iterrows():
-            lines.append(
-                f"{i+1}. {row['title']}\n"
-                f"Company: {row['company_name']}\n"
-                f"Role Bucket: {row['role_bucket']}\n"
-                f"Search Location: {row['location']}\n"
-                f"Source Type: {row['source_type']}\n"
-                f"Fit Score: {row['fit_score']}\n"
-                f"Published: {row['published']}\n"
-                f"{row['link']}\n"
-            )
+        # Group by classification tier for cleaner alert layout
+        tiers = ["DEEP", "MEDIUM", "QUICK"]
+        lines = [f"📌 Job Alert Agent — Top {len(send_df)} new jobs (last 24 h)\n"]
+
+        for tier in tiers:
+            tier_df = send_df[send_df["classification"] == tier]
+            if tier_df.empty:
+                continue
+
+            tier_labels = {"DEEP": "🟢 DEEP — Apply Now", "MEDIUM": "🟡 MEDIUM — Review", "QUICK": "🔵 QUICK — Scan"}
+            lines.append(f"\n{tier_labels[tier]}\n{'─' * 30}")
+
+            for i, row in tier_df.iterrows():
+                lines.append(
+                    f"{i+1}. {row['title']}\n"
+                    f"   Company: {row['company_name']}\n"
+                    f"   Role: {row['role_bucket']} | Score: {row['fit_score']}\n"
+                    f"   Location: {row['location']} | Source: {row['source_type']}\n"
+                    f"   Published: {row['published']}\n"
+                    f"   {row['link']}\n"
+                )
 
         message = "\n".join(lines)
 
@@ -572,6 +663,10 @@ def main():
 
     final_df = clean_and_rank(raw_df)
     print("Final jobs after filtering:", len(final_df))
+
+    if not final_df.empty:
+        tier_counts = final_df["classification"].value_counts().to_dict()
+        print("Classification breakdown:", tier_counts)
 
     new_jobs_df = get_new_jobs(final_df)
     print("New jobs not sent before:", len(new_jobs_df))
