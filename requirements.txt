@@ -8,3 +8,7 @@ yfinance>=0.2.0
 jupyter>=1.0.0
 jupyterlab>=3.5.0
 python-dateutil>=2.8.0
+feedparser
+requests
+gspread
+google-auth
