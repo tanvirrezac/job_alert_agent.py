@@ -2,11 +2,8 @@ name: Job Alert Agent
 
 on:
   schedule:
-    - cron: "17 */4 * * *"
+    - cron: '17 */4 * * *'
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   run-agent:
@@ -15,24 +12,30 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+          pip install feedparser requests gspread google-auth pandas
 
       - name: Run job agent
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python job_alert_agent.py
+
+      - name: Sync CSV to Google Sheets
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: |
-          python job_alert_agent.py
+          mkdir -p credentials
+          echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > credentials/service_account.json
+          python sync_to_sheets.py
 
       - name: Ensure CSV files exist
         run: |
@@ -42,11 +45,10 @@ jobs:
       - name: Commit CSV files
         run: |
           git config --global user.name "github-actions"
-          git config --global user.email "actions@github.com"
+          git config --global user.email "github-actions@github.com"
 
           git add sent_jobs.csv job_database.csv
 
-          git diff --cached --quiet && echo "No changes" && exit 0
+          git diff --cached --quiet || git commit -m "Update CSV files"
 
-          git commit -m "Update job tracking CSV files"
           git push
