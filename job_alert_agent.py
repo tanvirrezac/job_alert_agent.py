@@ -24,6 +24,12 @@ KEYWORDS = [
     "business systems analyst",
     "product owner",
     "data product owner",
+    # Financial Analyst track
+    "financial analyst",
+    "fp&a analyst",
+    "finance analyst",
+    "financial reporting analyst",
+    "financial planning analyst",
 ]
 
 LOCATIONS = [
@@ -126,6 +132,12 @@ PREFER_TERMS = [
     "analyst",
     "business intelligence",
     "analytics",
+    # Financial Analyst track
+    "financial analyst",
+    "fp&a",
+    "finance analyst",
+    "financial planning",
+    "financial reporting",
 ]
 
 # Balanced role scoring — no single role dominates
@@ -141,7 +153,13 @@ TARGET_ROLE_BONUS = {
     "business systems analyst": 7,
     "bi analyst": 7,
     "product owner": 7,
-    "data product owner": 7,   # previously 9; normalised to match others
+    "data product owner": 7,
+    # Financial Analyst track
+    "financial analyst": 7,
+    "fp&a analyst": 7,
+    "finance analyst": 7,
+    "financial reporting analyst": 7,
+    "financial planning analyst": 7,
 }
 
 # Slight Calgary preference; Toronto not over-boosted
@@ -232,6 +250,21 @@ CLASSIFICATION_TIERS = {
 
 def normalize_text(x):
     return str(x).strip().lower()
+
+def normalize_title_for_dedup(title: str) -> str:
+    """
+    Produce a canonical key for a job title so that the same posting
+    collected under different keywords / locations deduplicates cleanly.
+    Strips punctuation, extra whitespace, and common suffixes like
+    city/province appended by job boards (e.g. '– Calgary, AB').
+    """
+    t = normalize_text(title)
+    # Remove everything after a dash/pipe that looks like a location suffix
+    t = re.sub(r"\s*[-–|]\s*(calgary|toronto|edmonton|vancouver|remote|canada|ontario|bc|ab|on).*$", "", t)
+    # Strip all punctuation except letters/digits/spaces
+    t = re.sub(r"[^\w\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
 
 def clean_text(text):
     if not text:
@@ -354,6 +387,10 @@ def assign_role_bucket(title: str) -> str:
         return "Operations Analyst"
     if "insights analyst" in t:
         return "Insights Analyst"
+    # Financial Analyst track
+    if "financial analyst" in t or "fp&a analyst" in t or "finance analyst" in t \
+            or "financial reporting analyst" in t or "financial planning analyst" in t:
+        return "Financial Analyst"
     return "Other"
 
 def classify_job(fit_score: int) -> str:
@@ -471,16 +508,32 @@ def clean_and_rank(df):
         lambda r: is_us_location(r["title"], r["location"]), axis=1
     )
 
+    filtered_df = df[
+        (df["is_job_like"]) &
+        (df["within_24h"]) &
+        (~df["hard_excluded"]) &
+        (~df["us_location"])          # ← hard-reject US jobs
+    ].copy().reset_index(drop=True)
+
+    # ── Deduplication (three-layer) ──────────────────────────────────────────
+    # 1. Exact title + link match
+    filtered_df = filtered_df.drop_duplicates(subset=["title", "raw_link"])
+
+    # 2. Same title collected under different keywords or locations:
+    #    keep the row with the highest CITY_PRIORITY for that title.
+    filtered_df["_title_key"] = filtered_df["title"].apply(normalize_title_for_dedup)
+    filtered_df["_city_rank"] = filtered_df["location"].map(CITY_PRIORITY).fillna(0)
     filtered_df = (
-        df[
-            (df["is_job_like"]) &
-            (df["within_24h"]) &
-            (~df["hard_excluded"]) &
-            (~df["us_location"])          # ← hard-reject US jobs
-        ]
-        .drop_duplicates(subset=["title", "raw_link"])
-        .reset_index(drop=True)
+        filtered_df
+        .sort_values("_city_rank", ascending=False)
+        .drop_duplicates(subset=["_title_key"])
+        .drop(columns=["_title_key", "_city_rank"])
     )
+
+    # 3. Google News URL rewrites: same title, different redirect URL
+    #    (already handled by step 2 via _title_key)
+
+    filtered_df = filtered_df.reset_index(drop=True)
 
     if filtered_df.empty:
         return filtered_df
